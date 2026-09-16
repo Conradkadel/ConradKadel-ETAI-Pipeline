@@ -2,6 +2,17 @@
 
 - Student 20260680 - Conrad Kadel
 
+First Test Class 1 - 16th of September
+
+Precision Decision Tree :
+- Train accuracy: 0.829
+- Test accuracy:  0.627
+Precision Logisic Regression : 
+- Train accuracy: 0.678
+- Test accuracy:  0.679
+
+-  Decision Tree is overfitting so Logisic Regression is better
+
 This is the **starting point** for your semester project: a small but *complete* predictive pipeline -- every piece a real project needs (entry point, config, data loading, preprocessing, model, evaluation), just kept as simple as possible for now.
 
 The task: predict two-year recidivism using ProPublica's COMPAS
