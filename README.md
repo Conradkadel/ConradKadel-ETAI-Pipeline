@@ -13,6 +13,19 @@ Precision Logisic Regression :
 
 -  Decision Tree is overfitting so Logisic Regression is better
 
+Class 2 - 23rd of September (EDA + Preprocessing)
+
+After adding the diagnosis-driven cleaning + leak-safe preprocessing (target encoding + standard scaling):
+
+Decision Tree :
+- Train accuracy: 0.792
+- Test accuracy:  0.609
+Logistic Regression :
+- Train accuracy: 0.676
+- Test accuracy:  0.657
+
+- Decision Tree still overfits (gap +0.18). Logistic Regression generalises well (gap +0.02) and is still the best model.
+
 This is the **starting point** for your semester project: a small but *complete* predictive pipeline -- every piece a real project needs (entry point, config, data loading, preprocessing, model, evaluation), just kept as simple as possible for now.
 
 The task: predict two-year recidivism using ProPublica's COMPAS
@@ -32,7 +45,8 @@ go on.
 ├── requirements.txt
 ├── src/
 │   ├── data.py             # loading
-│   ├── preprocessing.py    # cleaning + train/test split
+│   ├── data_diagnostics.py # missingness test, domain rules, duplicate check (week 3)
+│   ├── preprocessing.py    # cleaning, leak-safe preprocessor + train/test split (grown in week 3)
 │   ├── model.py             # model construction
 │   ├── evaluate.py         # accuracy metrics + fairness check
 │   └── results.py          # saves each run's report to disk
@@ -49,6 +63,39 @@ This table is updated after each practical class, so you can always see what cha
 | Week | Practical class focus | Added to the pipeline |
 |------|------------------------|------------------------|
 | 2 | Introduction & baseline pipeline | Initial version: project structure, a single naive train/test split (no cross-validation), minimal preprocessing (drop rows with missing values, one-hot encode categoricals), logistic regression baseline, a first (deliberately simple) fairness check comparing our model's and COMPAS's own false-positive rate by race, train-vs-test accuracy reporting (to start spotting overfitting), and each run's full report saved automatically to `results/` |
+| 3 | EDA + preprocessing: diagnose the data, then fix it | New `src/data_diagnostics.py` (missingness-mechanism test via chi-square + Cramér's V, domain-rule invalid-value detection, two-way duplicate check). `src/preprocessing.py` now has `clean_dataset`, `add_missingness_indicators`, `split_features_target`, `build_preprocessor` (leak-safe `ColumnTransformer`) and `split_train_test`, replacing the naive `dropna()` / `get_dummies()`. Encoder/scaler (target + standard) picked by a 4x4 grid over 15 repeated splits. 3 redundant columns dropped. `config.yaml` gains `diagnostics` and `preprocessing` sections, so no column names are hardcoded. |
+
+## Preprocessing decisions
+
+From the week 3 diagnosis (`01_eda_introduction.ipynb`) and preprocessing (`02_preprocessing.ipynb`) notebooks.
+
+| Column(s) | Issue found | Mechanism | What was done |
+|---|---|---|---|
+| `age` | 2.0% missing + invalid values (< 18 or > 100) | MCAR / domain rule | invalid -> NaN, then median impute, no indicator |
+| `juv_fel_count` | 3.0% missing + negative values | MCAR / domain rule | invalid -> NaN, then median impute, no indicator |
+| `priors_count` | ~7% missing (incl. `-` placeholders) + values > 60 | MNAR (tied to `age_cat`, V ≈ 0.36) / domain rule | invalid -> NaN, median impute + `priors_count_was_missing` flag |
+| `c_charge_degree` | 3.2% missing | MNAR (tied to `age_cat`, V ≈ 0.35) | mode impute + `c_charge_degree_was_missing` flag |
+| `sex` | ~1.5% missing (incl. placeholders) | MCAR | mode impute, no indicator |
+| `race` | ~2% missing (placeholders) | MCAR | not a model feature, kept aside for the fairness check only |
+| `decile_score` | values outside 1-10 | domain rule | -> NaN (not a model feature, only used for comparison) |
+| `sex` / `race` / `c_charge_degree` / `score_text` | same category spelled many ways | data entry | canonicalized to one label |
+| (whole row) | 72 exact duplicates = 72 repeated ids | data entry | dropped, keep first occurrence |
+| `prior_offenses` | same as `priors_count` (r = 1.00) | multicollinearity | dropped |
+| `age_in_months` | same as `age` (r = 1.00) | multicollinearity | dropped |
+| `juvenile_total` | sum of the 3 `juv_*_count` columns (VIF) | multicollinearity | dropped |
+
+Encoder / scaler: the grid of 4 encoders x 4 scalers with logistic regression over 15 repeated splits picked **target encoding + standard scaling** (mean accuracy 0.670). The runner-up (target + none) is within noise on a paired check.
+
+## Best Model
+
+| Week | Model | Train acc | Test acc | Gap |
+|---|---|---|---|---|
+| 2 | Decision Tree | 0.829 | 0.627 | +0.202 |
+| 2 | Logistic Regression | 0.678 | 0.679 | -0.001 |
+| 3 | Decision Tree | 0.792 | 0.609 | +0.183 |
+| 3 | Logistic Regression | 0.676 | 0.657 | +0.019 |
+
+Current best: **Logistic Regression**. Test accuracy is a bit lower than in week 2, but week 2 dropped every row with any missing value (and the invalid values stayed in), so it was tested on a smaller, "easier" subset. Week 3 keeps all 7,214 de-duplicated rows.
 
 ## Environment setup
 
