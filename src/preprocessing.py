@@ -1,47 +1,57 @@
 """
-Preprocessing (week 3) -- raw data in, model-ready train/test split out.
-Built from 02_preprocessing.ipynb. Same file as week 2, it just grew:
+Preprocessing -- raw data in, model-ready data out: category cleanup, domain-rule/
+placeholder -> NaN conversion, de-duplication, mechanism-matched imputation, a
+leak-safe/deployable encoder/scaler pipeline, and the split that sets the final test
+set aside. One file, one obvious place to look for "how does raw data become model-ready."
 
-    clean_dataset              -> category cleanup, placeholders/invalid values -> NaN,
-                                  drop duplicates, drop redundant columns
-    add_missingness_indicators -> `<col>_was_missing` flags for the MNAR columns
-    split_features_target      -> (X, y, extras); y is None on label-free data
-    build_preprocessor         -> leak-safe ColumnTransformer (impute + encode + scale)
-    split_train_test           -> stratified train/test split (week 2's original job)
+See Practical/W4/notebooks/02_preprocessing.ipynb for the full walkthrough, and
+03_cross_validation.ipynb for why the split below now creates a *locked* test set.
 
-Two rules every function respects:
-  - leak-safe: clean_dataset / split_features_target learn nothing from the data, so they
-    can run on the whole dataset. Imputing, encoding and scaling (build_preprocessor) are
-    only ever FIT on the training rows, inside the sklearn Pipeline in main.py.
-  - deployable: nothing before the split needs the target column to be present.
-
-No COMPAS column names are hardcoded -- they all come from config.yaml.
+Two things every function here respects, on purpose:
+  - leak-safe: `clean_dataset` and `split_features_target` learn nothing from the data
+    (no means, no category lists, no target), so they're safe to run on the whole
+    dataset. Everything that *is* learned from data -- imputation, encoding, scaling --
+    lives inside `build_preprocessor`'s ColumnTransformer, which sits inside the model's
+    sklearn Pipeline. That means it gets re-fit on the training part of every CV fold,
+    and never sees the validation fold or the locked test set.
+  - deployable from day one: nothing before the split needs the target column --
+    `y` comes back as `None` on label-free inference data, and nothing breaks.
 """
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler, MinMaxScaler, RobustScaler
-from category_encoders import CountEncoder, TargetEncoder
-
-from src.data_diagnostics import flag_invalid_values
-
-
-# ---------------------------------------------------------------------------
-# Step 1 - cleaning (no fitting, safe on the whole dataset)
-# ---------------------------------------------------------------------------
-
-def find_placeholder_rows(series: pd.Series, tokens: set) -> pd.Series:
-    """True where the value is a placeholder like '-', '?', 'n/a'."""
-    return series.astype(str).str.strip().isin(tokens)
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.preprocessing import (
+    OneHotEncoder, OrdinalEncoder, TargetEncoder, StandardScaler, MinMaxScaler, RobustScaler,
+)
+from category_encoders import CountEncoder
 
 
-def canonicalize_categories(df: pd.DataFrame, columns_and_maps: dict, placeholder_tokens: set) -> pd.DataFrame:
-    """Normalise whitespace/casing, then map known spelling variants to one label
-    (e.g. 'MALE', ' male ' -> 'Male'). Placeholder tokens become NaN.
-    Values not in the map are kept as-is, so a new category doesn't silently disappear."""
+def flag_invalid_values(df: pd.DataFrame, rules: dict) -> pd.DataFrame:
+    """
+    Applies a dict of {column: {"min": ..., "max": ...}} domain rules (either bound is
+    optional) and converts violations to NaN **in place** on `df`. An "impossible but
+    not missing" value (an age of -3, a COMPAS decile score of 15) counts as missing
+    once this runs -- `.isna()` alone would never have caught it.
+
+    Returns a small report: how many violations were found per column.
+    """
+    report_rows = []
+    for column, bounds in rules.items():
+        if column not in df.columns:
+            continue
+        numeric = pd.to_numeric(df[column], errors="coerce")
+        lower_ok = numeric >= bounds["min"] if "min" in bounds else pd.Series(True, index=numeric.index)
+        upper_ok = numeric <= bounds["max"] if "max" in bounds else pd.Series(True, index=numeric.index)
+        violations = numeric.notna() & ~(lower_ok & upper_ok)
+        report_rows.append({"column": column, "rule": bounds, "violations": int(violations.sum())})
+        df.loc[violations, column] = np.nan
+    return pd.DataFrame(report_rows)
+
+
+def _canonicalize_categories(df: pd.DataFrame, columns_and_maps: dict, placeholder_tokens: set) -> pd.DataFrame:
     out = df.copy()
     for col, mapping in columns_and_maps.items():
         if col not in out.columns:
@@ -49,50 +59,56 @@ def canonicalize_categories(df: pd.DataFrame, columns_and_maps: dict, placeholde
         cleaned = out[col].astype(str).str.strip()
         lowered = cleaned.str.lower()
         out[col] = lowered.map(mapping).fillna(cleaned)
-        out.loc[find_placeholder_rows(out[col], placeholder_tokens), col] = np.nan
+        out.loc[out[col].astype(str).str.strip().isin(placeholder_tokens), col] = np.nan
     return out
 
 
 def clean_dataset(df: pd.DataFrame, diagnostics_config: dict) -> pd.DataFrame:
     """
-    Applies the EDA notebook's diagnosis, all read from config.yaml `diagnostics`:
-    category cleanup, placeholder / domain-rule -> NaN, de-duplication,
-    redundant-column removal. Target-agnostic -- safe on label-free inference data.
+    Applies the week 3 diagnosis: category cleanup, domain-rule/placeholder -> NaN
+    conversion, and redundant-column removal. Target-agnostic -- safe to call on
+    label-free inference data, since none of this depends on a target column.
+
+    Row-preserving (week 4): every input row comes out, in the same order. Removing
+    duplicate rows is a *training-only* decision and lives in `drop_duplicate_rows()` --
+    at prediction time every row needs a prediction (a Kaggle submission needs one per id).
     """
     out = df.copy()
-    placeholder_tokens = set(diagnostics_config["placeholder_tokens"])
+    placeholder_tokens = set(diagnostics_config.get("placeholder_tokens", []))
 
-    # 1) numeric columns that loaded as text because of placeholder tokens -> real numbers
+    # numeric columns that load as text purely because of a placeholder token
     for col in diagnostics_config.get("numeric_text_columns", []):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col].replace(list(placeholder_tokens), np.nan), errors="coerce")
 
-    # 2) domain-rule violations -> NaN (e.g. age of -3, decile score of 23)
     flag_invalid_values(out, diagnostics_config.get("validity_rules", {}))
 
-    # 3) category canonicalization (also turns placeholder tokens into NaN)
-    out = canonicalize_categories(out, diagnostics_config.get("canonical_maps", {}), placeholder_tokens)
+    out = _canonicalize_categories(out, diagnostics_config.get("canonical_categories", {}), placeholder_tokens)
 
-    # 4) duplicates: exact row dupes first, then repeated ids -- keep the first occurrence
-    out = out.drop_duplicates()
-    id_column = diagnostics_config.get("id_column")
-    if id_column and id_column in out.columns:
-        out = out.drop_duplicates(subset=id_column, keep="first")
-
-    # 5) redundant columns found via correlation heatmap + VIF
-    cols_to_drop = [c for c in diagnostics_config.get("redundant_columns", []) if c in out.columns]
-    out = out.drop(columns=cols_to_drop)
+    columns_to_drop = [c for c in diagnostics_config.get("redundant_columns", []) if c in out.columns]
+    out = out.drop(columns=columns_to_drop)
 
     return out
 
 
-# ---------------------------------------------------------------------------
-# Step 2/3 - features, target and the leak-safe preprocessor
-# ---------------------------------------------------------------------------
+def drop_duplicate_rows(df: pd.DataFrame, id_column: str = None) -> pd.DataFrame:
+    """
+    TRAINING DATA ONLY (week 4). Drops exact duplicate rows and repeated ids (keeping
+    the first), so the same person can't be counted twice -- or land in both the
+    development and the locked test set. Must run *before* `split_dev_test()`.
+
+    Never call this on data you're predicting for: every row there needs a prediction.
+    """
+    out = df.drop_duplicates()
+    if id_column and id_column in out.columns:
+        out = out.drop_duplicates(subset=id_column, keep="first")
+    return out
+
 
 def add_missingness_indicators(df: pd.DataFrame, mnar_indicator_sources: list) -> pd.DataFrame:
-    """Adds a `<col>_was_missing` flag for each MNAR column, BEFORE that column gets imputed.
-    Target-agnostic -- safe on label-free inference data."""
+    """Adds a `<col>_was_missing` flag for each MNAR-diagnosed column, before that
+    column gets imputed -- so a model can still see the pattern even though the fill
+    value itself (median/mode) can't carry it. Target-agnostic."""
     out = df.copy()
     for col in mnar_indicator_sources:
         if col in out.columns:
@@ -102,77 +118,90 @@ def add_missingness_indicators(df: pd.DataFrame, mnar_indicator_sources: list) -
 
 def split_features_target(df: pd.DataFrame, data_config: dict, mnar_indicator_sources: list):
     """
-    Splits into (X, y, extras).
-      X      -> model features (everything not in drop_columns / target / sensitive attr)
-      y      -> the target, or None on label-free inference data
-      extras -> sensitive attribute + COMPAS's own score, kept aside for the fairness report only
+    Returns (X, y, extras). `y` is `None` and `extras` has no target column when called
+    on label-free inference data -- nothing downstream requires the target to be present.
     """
     target = data_config["target"]
     sensitive_attr = data_config["sensitive_attr"]
-    extras_columns = [sensitive_attr] + data_config.get("fairness_extra_columns", [])
+    drop_columns = data_config.get("drop_columns", [])
 
     df = add_missingness_indicators(df, mnar_indicator_sources)
     y = df[target] if target in df.columns else None
 
-    extras_cols = [c for c in extras_columns if c in df.columns]
+    extras_cols = [c for c in [sensitive_attr, "score_text"] if c in df.columns]
     extras = df[extras_cols].copy() if extras_cols else None
 
-    drop_always = set(data_config.get("drop_columns", [])) | {target, sensitive_attr}
-    feature_cols = [c for c in df.columns if c not in drop_always]
+    always_drop = set(drop_columns) | {target, sensitive_attr}
+    feature_cols = [c for c in df.columns if c not in always_drop]
     X = df[feature_cols]
     return X, y, extras
 
 
+_SCALERS = {"none": "passthrough", "standard": StandardScaler, "minmax": MinMaxScaler, "robust": RobustScaler}
+# Each entry takes a random_state (only the target encoder actually uses it).
+# Target encoding uses sklearn's TargetEncoder (new in week 4, replacing category_encoders'):
+# during fit it *cross-fits* -- each training row is encoded with category means computed
+# on the OTHER internal folds, never on its own label. Without that, a row's own target
+# leaks into its own feature value, and the model learns to trust the encoding more than
+# it deserves. Unseen categories at predict time get the overall target mean.
+_ENCODERS = {
+    "onehot": lambda seed: OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+    "ordinal": lambda seed: OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1),
+    "count": lambda seed: CountEncoder(handle_unknown=0, handle_missing=0),
+    "target": lambda seed: TargetEncoder(target_type="binary", cv=StratifiedKFold(5, shuffle=True, random_state=seed)),
+}
+
+
 def build_preprocessor(preprocessing_config: dict) -> ColumnTransformer:
     """
-    Factory: builds a leak-safe ColumnTransformer for the encoder/scaler pair in config.yaml
-    (picked by the empirical grid in 02_preprocessing.ipynb). Every encoder tolerates unseen
-    categories at transform time -- fit on train, applied unchanged to test/inference.
+    Factory: builds a leak-safe ColumnTransformer for the chosen encoder/scaler pair --
+    read from `config.yaml`'s `preprocessing` section (chosen there, not hardcoded
+    here). Every encoder tolerates unseen
+    categories at transform time. Nothing is fit here: fitting happens later, on the
+    training part of each CV fold only, because this object is placed *inside* the
+    model's sklearn Pipeline (see main.py).
     """
     encoder_name = preprocessing_config["encoder"]
     scaler_name = preprocessing_config["scaler"]
-    imputation = preprocessing_config["imputation"]
+    numeric_features = preprocessing_config["numeric_features"]
+    categorical_features = preprocessing_config["categorical_features"]
+    mnar_indicator_sources = preprocessing_config.get("mnar_indicator_sources", [])
+    imputation = preprocessing_config.get("imputation", {})
 
-    # built inside the function so every call gets fresh, unfitted objects
-    scalers = {
-        "none": "passthrough",
-        "standard": StandardScaler(),
-        "minmax": MinMaxScaler(),
-        "robust": RobustScaler(),
-    }
-    encoders = {
-        "onehot": OneHotEncoder(handle_unknown="ignore", sparse_output=False),
-        "ordinal": OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1),
-        "count": CountEncoder(handle_unknown=0, handle_missing=0),
-        "target": TargetEncoder(handle_unknown="value", handle_missing="value"),
-    }
-
-    numeric_indicator_cols = [f"{c}_was_missing" for c in preprocessing_config.get("mnar_indicator_sources", [])]
+    scaler_factory = _SCALERS[scaler_name]
+    scaler = scaler_factory() if callable(scaler_factory) else scaler_factory
+    encoder = _ENCODERS[encoder_name](preprocessing_config.get("random_state"))
 
     numeric_pipeline = Pipeline([
-        ("impute", SimpleImputer(strategy=imputation["numeric_strategy"])),
-        ("scale", scalers[scaler_name]),
+        ("impute", SimpleImputer(strategy=imputation.get("numeric_strategy", "median"))),
+        ("scale", scaler),
     ])
     categorical_pipeline = Pipeline([
-        ("impute", SimpleImputer(strategy=imputation["categorical_strategy"])),
-        ("encode", encoders[encoder_name]),
+        ("impute", SimpleImputer(strategy=imputation.get("categorical_strategy", "most_frequent"))),
+        ("encode", encoder),
     ])
+
+    indicator_cols = [f"{c}_was_missing" for c in mnar_indicator_sources]
 
     return ColumnTransformer([
-        ("numeric", numeric_pipeline, preprocessing_config["numeric_features"]),
-        ("categorical", categorical_pipeline, preprocessing_config["categorical_features"]),
-        ("indicators", "passthrough", numeric_indicator_cols),   # 0/1 flags, no processing needed
+        ("numeric", numeric_pipeline, numeric_features),
+        ("categorical", categorical_pipeline, categorical_features),
+        ("indicators", "passthrough", indicator_cols),
     ])
 
 
-# ---------------------------------------------------------------------------
-# Split (week 2's original job)
-# ---------------------------------------------------------------------------
+def split_dev_test(X, y, extras, test_size: float, random_state: int):
+    """
+    Sets the final test set aside (week 4 -- replaces week 2/3's `split_train_test`).
 
-def split_train_test(X, y, extras, test_size: float, random_state: int):
-    """Stratified split of X, y and extras together, so all three stay row-aligned.
-    This is the leak-safe boundary: from here on, anything fitted sees only X_train."""
-    X_train, X_test, y_train, y_test, extras_train, extras_test = train_test_split(
+    Stratified split of X, y and the extras frame (race/score_text, kept for the fairness
+    report) together, so all three stay row-aligned. Returns a *development* set and a
+    *locked test set*:
+      - development set: everything we're allowed to learn from and compare models on.
+        Cross-validation (src/evaluate.py) splits it again into train/validation folds.
+      - locked test set: never used to fit, tune, compare or choose anything. Its size and seed live in config.yaml's `test_set` section and are never changed after today.
+    """
+    X_dev, X_test, y_dev, y_test, extras_dev, extras_test = train_test_split(
         X, y, extras, test_size=test_size, random_state=random_state, stratify=y
     )
-    return X_train, X_test, y_train, y_test, extras_train, extras_test
+    return X_dev, X_test, y_dev, y_test, extras_dev, extras_test
