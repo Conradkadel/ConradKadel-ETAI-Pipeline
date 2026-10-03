@@ -34,7 +34,35 @@ Changes I made this week (pulled in the course update for week 4 and went throug
 - `src/data_diagnostics.py` is gone; `flag_invalid_values` lives in `src/preprocessing.py` and de-duplication (`drop_duplicate_rows`) only runs on training data.
 - Added a dummy (majority-class) model as the floor to beat, and a random forest option in `config.yaml`.
 
-Results of the first cross-validated run are still to be added after I rerun on the updated environment.
+Results with stratified 5-fold cross-validation on the development set (5771 rows; same pipeline, only `model.type` in `config.yaml` changed between runs; scikit-learn 1.9.1):
+
+Dummy (majority class) :
+- Train accuracy: 0.549
+- Validation accuracy: 0.549 (std 0.000)
+Logistic Regression :
+- Train accuracy: 0.675
+- Validation accuracy: 0.672 (std 0.013)
+Decision Tree :
+- Train accuracy: 0.694
+- Validation accuracy: 0.610 (std 0.016)
+Random Forest (untuned, 300 trees) :
+- Train accuracy: 0.733
+- Validation accuracy: 0.650 (std 0.018)
+
+Before vs after cross-validation (accuracy):
+
+| Model | Class 2: single split (train / test, gap) | Class 3: 5-fold CV (train / validation, gap) |
+|---|---|---|
+| Decision Tree | 0.792 / 0.609, +0.18 | 0.694 / 0.610, +0.084 |
+| Logistic Regression | 0.676 / 0.657, +0.02 | 0.675 / 0.672, +0.003 |
+
+Findings:
+- Logistic Regression is still the best model. Its validation accuracy (0.672) is 0.12 above the dummy floor (0.549), and the train-validation gap is about zero, so it is not overfitting.
+- The Decision Tree's validation accuracy barely moved (0.609 -> 0.610), but its train accuracy dropped from 0.792 to 0.694, so the overfitting gap roughly halved (+0.18 -> +0.084). A tree that is judged on its own training rows with an in-sample target encoding looks better than it is; the cross-fitting `TargetEncoder` removes that, which is the most likely reason (I did not isolate it with a separate run). It still overfits more than the logistic regression.
+- The Random Forest (0.650) beats the tree (+0.04) but not the logistic regression, and its gap is about as large as the tree's (+0.083). Untuned, it is not worth the extra complexity yet.
+- One split gives one number; cross-validation shows how much that number can move. Logistic Regression's validation accuracy ranges from 0.654 to 0.688 across the five folds, so the single-split 0.657 from class 2 was a plausible but slightly low draw, not a different model quality.
+- Fairness (out-of-fold false positive rate, African-American vs Caucasian): Logistic Regression 0.26 vs 0.13, Decision Tree 0.35 vs 0.25, Random Forest 0.36 vs 0.23, COMPAS 0.45 vs 0.23. Our logistic regression is lower in absolute terms, but it also flags fewer people overall (recall 0.51), and the African-American rate is still about twice the Caucasian rate. The Asian (n=21) and Native American (n=6) groups are too small to read anything into.
+- The locked test set (1443 rows) has not been evaluated and stays that way until the final model is chosen.
 
 This is the **starting point** for your semester project: a small but *complete* predictive pipeline -- every piece a real project needs (entry point, config, data loading, preprocessing, model, evaluation), just kept as simple as possible for now.
 
