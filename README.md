@@ -26,6 +26,16 @@ Logistic Regression :
 
 - Decision Tree still overfits (gap +0.18). Logistic Regression generalises well (gap +0.02) and is still the best model.
 
+Class 3 - 30th of September (Cross-validation + locked test set)
+
+Changes I made this week (pulled in the course update for week 4 and went through it file by file):
+- The final 20% test set is now split off first (`split_dev_test`) and left untouched; all model comparison happens on the development set with stratified 5-fold cross-validation of the whole pipeline.
+- Target encoding now uses scikit-learn's cross-fitting `TargetEncoder`, so a row's own label no longer leaks into its own encoding. This needs `scikit-learn>=1.9` -- run `pip install -U -r requirements.txt` in the venv first, otherwise the pipeline fails inside `TargetEncoder`.
+- `src/data_diagnostics.py` is gone; `flag_invalid_values` lives in `src/preprocessing.py` and de-duplication (`drop_duplicate_rows`) only runs on training data.
+- Added a dummy (majority-class) model as the floor to beat, and a random forest option in `config.yaml`.
+
+Results of the first cross-validated run are still to be added after I rerun on the updated environment.
+
 This is the **starting point** for your semester project: a small but *complete* predictive pipeline -- every piece a real project needs (entry point, config, data loading, preprocessing, model, evaluation), just kept as simple as possible for now.
 
 The task: predict two-year recidivism using ProPublica's COMPAS
