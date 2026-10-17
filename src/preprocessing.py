@@ -163,7 +163,9 @@ def build_preprocessor(preprocessing_config: dict) -> ColumnTransformer:
     """
     encoder_name = preprocessing_config["encoder"]
     scaler_name = preprocessing_config["scaler"]
-    numeric_features = preprocessing_config["numeric_features"]
+    # engineered columns (config: preprocessing.engineered_features) are numeric too -- listing them once
+    # there is enough; an empty list gives the baseline without them
+    numeric_features = list(preprocessing_config["numeric_features"]) + list(preprocessing_config.get("engineered_features") or [])
     categorical_features = preprocessing_config["categorical_features"]
     mnar_indicator_sources = preprocessing_config.get("mnar_indicator_sources", [])
     imputation = preprocessing_config.get("imputation", {})
@@ -205,3 +207,27 @@ def split_dev_test(X, y, extras, test_size: float, random_state: int):
         X, y, extras, test_size=test_size, random_state=random_state, stratify=y
     )
     return X_dev, X_test, y_dev, y_test, extras_dev, extras_test
+
+
+# Week 6 (Challenge 1): engineered features. Fixed formulas only -- nothing is learned from the data,
+# so they are safe to compute before the split, and equally safe on new data. A NaN input gives a NaN
+# output (never a made-up 0), so the imputer inside the Pipeline fills it later, from training rows only.
+# Which ones are used is chosen in config.yaml (`preprocessing.engineered_features`): an empty list
+# is the baseline, so "with vs without" is a one-line config change.
+_ENGINEERED = {
+    # priors per year of adulthood: 2 priors at 19 is not the same history as 2 priors at 45
+    "priors_per_adult_year": lambda d: d["priors_count"] / (d["age"] - 17).clip(lower=1),
+    # 1 if under 25 AND at least one prior, else 0 (25 = the "Less than 25" edge of the age_cat column)
+    "young_with_priors": lambda d: ((d["age"] < 25) & (d["priors_count"] > 0)).astype(float)
+                                   .where(d["age"].notna() & d["priors_count"].notna()),
+}
+
+
+def add_engineered_features(df: pd.DataFrame, names: list = None) -> pd.DataFrame:
+    """Adds the engineered columns listed in `names` (default: none). Row-preserving and target-agnostic."""
+    out = df.copy()
+    for name in names or []:
+        if name not in _ENGINEERED:
+            raise ValueError(f"Unknown engineered feature: {name}. Options: {list(_ENGINEERED)}")
+        out[name] = _ENGINEERED[name](out)
+    return out

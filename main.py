@@ -9,22 +9,20 @@ This orchestrates the full pipeline:
     -> split features/target
     -> set the final test set aside, locked (week 4)
     -> stratified k-fold cross-validation of preprocessing + model on the development set (week 4)
+    -> week 5: hyperparameter tuning (Optuna) + nested CV, if tuning.enabled
     -> out-of-fold classification report + fairness check
     -> refit the final model on the whole development set -> save results
 """
+import optuna
 import yaml
 from sklearn.model_selection import StratifiedKFold
-from sklearn.pipeline import Pipeline
 
 from src.data import load_data
-from src.preprocessing import (
-    clean_dataset, drop_duplicate_rows, split_features_target, build_preprocessor, split_dev_test,
-)
-from src.model import build_model
-from src.evaluate import (
-    cross_validate_pipeline, cv_report, oof_classification_report, fairness_report,
-)
+from src.preprocessing import (add_engineered_features, clean_dataset, drop_duplicate_rows, split_features_target, split_dev_test,)
+from src.model import build_pipeline  # week 5: preprocessing + model as ONE estimator
+from src.evaluate import (cross_validate_pipeline, cv_report, oof_classification_report, fairness_report,)
 from src.results import save_run
+from src.tuning import tune_pipeline, nested_cross_validate, tuning_report  # week 5
 
 
 def load_config(path: str = "config.yaml") -> dict:
@@ -42,6 +40,9 @@ def main():
     # training data only: the same person must not count twice, or sit in both dev and test
     df_clean = drop_duplicate_rows(df_clean, config["diagnostics"].get("id_column"))
 
+    # week 6: hand-made features chosen in config (preprocessing.engineered_features; [] = none)
+    df_clean = add_engineered_features(df_clean, config["preprocessing"].get("engineered_features", []))
+    
     mnar_sources = config["preprocessing"].get("mnar_indicator_sources", [])
     X, y, extras = split_features_target(df_clean, config["data"], mnar_sources)
 
@@ -56,10 +57,8 @@ def main():
 
     # preprocessing lives INSIDE the pipeline, so cross-validation re-fits it on the
     # training part of every fold -- the validation fold never leaks into its own preprocessing
-    pipeline = Pipeline([
-        ("prep", build_preprocessor(config["preprocessing"])),
-        ("model", build_model(config["model"])),
-    ])
+    # week 5: built by build_pipeline() so tuning can address its steps by name (model__max_depth, ...)
+    pipeline = build_pipeline(config["preprocessing"], config["model"])
 
     # a fixed random_state = the same folds on every run and for every model, so comparing
     # two models' fold scores is a like-for-like (paired) comparison
@@ -74,7 +73,46 @@ def main():
         pipeline, X_dev, y_dev, cv, scoring, n_jobs=cv_config.get("n_jobs", 1)
     )
 
-    report = cv_report(fold_scores, scoring)
+    # logging: record which hyperparameters the default CV used, so a results file is self-explanatory
+    header = f"Hyperparameters from config.yaml: {config['model'].get('params')}"
+    print(header)
+    report = header + "\n" + cv_report(fold_scores, scoring)
+
+    # week 5: hyperparameter tuning -- on the development set only, every candidate scored by CV of the whole pipeline 
+    tuning_config = config.get("tuning", {})
+    tuning_enabled = tuning_config.get("enabled", False)
+    nested_scores = None
+    if tuning_enabled:
+        model_type = config["model"]["type"]
+        search_spaces = tuning_config.get("search_spaces") or {}
+        if model_type not in search_spaces:
+            raise ValueError(f"tuning.enabled is true but tuning.search_spaces has no entry for "
+                             f"'{model_type}'. Options: {list(search_spaces)}")
+        search_space = search_spaces[model_type]
+        n_trials = tuning_config["n_trials"]
+        tuning_seed = tuning_config["random_state"]
+        n_jobs = cv_config.get("n_jobs", 1)
+        inner_cv = StratifiedKFold(n_splits=tuning_config["n_splits"], shuffle=True,
+                                   random_state=tuning_seed)
+        optuna.logging.set_verbosity(optuna.logging.WARNING)   # logging: hide per-trial lines (the report lists the top trials)
+        print(f"\nNested cross-validation: {cv.get_n_splits()} outer folds x {n_trials} trials x "
+              f"{inner_cv.get_n_splits()} inner folds ...")      # logging: what is about to run (can take minutes)
+
+        # 1. the honest estimate (its out-of-fold predictions replace the untuned ones)
+        nested_scores, y_oof = nested_cross_validate(
+            pipeline, X_dev, y_dev, cv, inner_cv, scoring, search_space, n_trials, tuning_seed,
+            n_jobs=n_jobs
+        )
+        report += "\n\nNested cross-validation (tuned model, honest estimate)\n" + cv_report(nested_scores, scoring)
+
+        # 2. the hyperparameters we keep: the same procedure, once, on the whole development set
+        pipeline, study = tune_pipeline(
+            pipeline, X_dev, y_dev, inner_cv, scoring, search_space, n_trials, tuning_seed,
+            n_jobs=n_jobs
+        )
+        print()
+        report += "\n\n" + tuning_report(study, nested_scores, scoring)
+
     report += "\n\n" + oof_classification_report(y_dev, y_oof)
     report += "\n" + fairness_report(
         y_dev, y_oof, extras_dev, sensitive_attr=config["data"]["sensitive_attr"]
@@ -84,6 +122,8 @@ def main():
     # estimated how well this recipe does; it didn't produce a model.
     final_model = pipeline.fit(X_dev, y_dev)
     refit = f"Final model: {config['model']['type']} refit on all {len(X_dev)} development rows."
+    if tuning_enabled:
+        refit += f" Tuned hyperparameters: {study.best_params}"
     print(refit)
     report += "\n" + refit + "\n"
 
@@ -95,6 +135,11 @@ def main():
     results_dir = config.get("output", {}).get("results_dir", "results")
     path = save_run(results_dir, config, report)
     print(f"Full results saved to {path}")
+    if nested_scores is not None:
+        # per-fold nested scores, so two runs can be compared with corrected_paired_test()
+        nested_path = path.replace(".txt", "_nested.csv")
+        nested_scores.to_csv(nested_path, index=False)
+        print(f"Nested fold scores saved to {nested_path}")
 
 
 if __name__ == "__main__":

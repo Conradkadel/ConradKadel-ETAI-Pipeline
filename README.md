@@ -2,6 +2,7 @@
 
 - Student 20260680 - Conrad Kadel
 
+
 First Test Class 1 - 16th of September
 
 Precision Decision Tree :
@@ -64,15 +65,27 @@ Findings:
 - Fairness (out-of-fold false positive rate, African-American vs Caucasian): Logistic Regression 0.26 vs 0.13, Decision Tree 0.35 vs 0.25, Random Forest 0.36 vs 0.23, COMPAS 0.45 vs 0.23. Our logistic regression is lower in absolute terms, but it also flags fewer people overall (recall 0.51), and the African-American rate is still about twice the Caucasian rate. The Asian (n=21) and Native American (n=6) groups are too small to read anything into.
 - The locked test set (1443 rows) has not been evaluated and stays that way until the final model is chosen.
 
-This is the **starting point** for your semester project: a small but *complete* predictive pipeline -- every piece a real project needs (entry point, config, data loading, preprocessing, model, evaluation), just kept as simple as possible for now.
 
-The task: predict two-year recidivism using ProPublica's COMPAS
-dataset -- the data behind a real 2016 investigation into a risk-
-assessment algorithm actually used by US courts to help inform bail and sentencing decisions. See `data/README.md` for the full problem description and a complete data dictionary before you start.
+Class 5 & 6 - October (hyperparameter tuning, ensembles, feature engineering)
 
-It has some **deliberately weak spots**. Part of your work this
-semester is finding them and making them better -- see the pipeline progress table below, which tracks what changes and why as the weeks
-go on.
+What happened: week 5 added Optuna tuning with nested cross-validation (`src/tuning.py`); week 6 added two models, an oblique random forest and AdaBoost, plus a corrected paired test (`corrected_paired_test()`) to compare models fairly. I also switched the metric to macro-F1 and added two hand-made features, `priors_per_adult_year` and `young_with_priors`. All three models were tuned with 30 trials on the same folds.
+
+Results (5-fold CV on the 5771 development rows, macro-F1, locked test set untouched):
+
+| Model | Default CV (gap) | Tuned, nested CV (gap) | Optimism | Chosen hyperparameters |
+|---|---|---|---|---|
+| Random forest | 0.639 (+0.102) | 0.663 ± 0.010 (+0.017) | +0.004 | depth 10, leaf 11, `sqrt` |
+| Oblique random forest | 0.639 (+0.131) | 0.662 ± 0.010 (+0.026) | +0.006 | depth 6, leaf 11, 9 components |
+| AdaBoost | 0.654 (+0.007) | 0.662 ± 0.009 (+0.015) | +0.004 | depth 4, 189 rounds, lr 0.059 |
+
+Findings:
+- Tuning mostly fixes overfitting: the two forests go from a gap of +0.10 / +0.13 to about +0.02 and gain ~0.02 macro-F1. AdaBoost barely overfit to begin with.
+- No model wins. The three differ by ~0.001, ten times less than the fold-to-fold std, and the corrected paired test gives p = 0.86 to 0.91 for every pair.
+- Optimism is small (+0.004 to +0.006), so the nested number (~0.662) is the one to report, not the best-trial 0.668.
+- The chosen hyperparameters change a lot from fold to fold and the top-5 trials are within 0.003, so the score is on a flat plateau; the exact "best" values don't matter much.
+- Fairness does not depend on the model: false positive rate for African-American vs Caucasian is 0.27-0.30 vs 0.16-0.17 (about 1.8x), lower than COMPAS (0.45 vs 0.23) but with the same ratio. The features are the more likely cause, which I have not tested.
+- Recall for people who reoffend is only 0.53-0.55 for all three.
+- Engineered features: all results above include the two hand-made features `priors_per_adult_year` and `young_with_priors` (set in `config.yaml`). I did not run a with/without comparison under macro-F1, so I cannot say how much they add on their own.
 
 ## Project structure
 
@@ -84,8 +97,9 @@ go on.
 ├── src/
 │   ├── data.py               # loading
 │   ├── preprocessing.py      # row-preserving cleaning (incl. domain-rule checks), training-only de-duplication, deployable preprocessing pipeline, and the split that locks the final test set away (week 4)
-│   ├── model.py               # model construction
-│   ├── evaluate.py           # stratified k-fold cross-validation, out-of-fold report + fairness check (week 4)
+│   ├── model.py               # model construction (incl. the oblique random forest and AdaBoost builders, week 6) + build_pipeline(): preprocessing + model as one estimator (week 5)
+│   ├── evaluate.py           # stratified k-fold cross-validation, out-of-fold report + fairness check (week 4), corrected paired test to compare two models (week 6)
+│   ├── tuning.py             # hyperparameter tuning with Optuna + nested cross-validation (week 5)
 │   └── results.py            # saves each run's report to disk
 ├── results/                  # created automatically -- one file per run (not tracked in git)
 └── data/
@@ -102,6 +116,8 @@ This table is updated after each practical class, so you can always see what cha
 | 2 | Introduction & baseline pipeline | Initial version: project structure, a single naive train/test split (no cross-validation), minimal preprocessing (drop rows with missing values, one-hot encode categoricals), logistic regression baseline, a first (deliberately simple) fairness check comparing our model's and COMPAS's own false-positive rate by race, train-vs-test accuracy reporting (to start spotting overfitting), and each run's full report saved automatically to `results/` |
 | 3 | EDA + preprocessing -- diagnose the data, then fix it | `src/data_diagnostics.py` (missingness-mechanism test via chi-square + Cramér's V, domain-rule invalid-value detection, two-way duplicate check) and `src/preprocessing.py` (leak-safe category cleanup, mechanism-matched imputation with `_was_missing` indicators for MNAR columns, a deployable `ColumnTransformer`, **and** the train/test split itself, all in the one file rather than split across two) replace the old naive `dropna()`/`pd.get_dummies()` preprocessing; encoder/scaler pair (target encoding + standard scaling) chosen by an empirical grid over 15 repeated splits, checked against the runner-up with a paired comparison so the win isn't just noise; three redundant columns (found via correlation + VIF) dropped; `config.yaml` gains `diagnostics` and `preprocessing` sections -- see "Preprocessing decisions" below. Threshold-independent metrics (ROC-AUC/PR-AUC) and a calibration check are deliberately **not** added yet -- not yet |
 | 4 | Preprocessing inside the pipeline + cross-validation -- evaluating a model honestly | A **locked final test set** (20%, stratified, seed 42) is set aside by `split_dev_test()` (replaces `split_train_test()`) and never scored; models are now judged by **stratified 5-fold cross-validation** of the whole pipeline (preprocessing + model) on the development set, reported per fold with mean ± std and the train-validation gap; the classification report and fairness check now use out-of-fold predictions; target encoding switched to scikit-learn's cross-fitting `TargetEncoder` (a row's own label never leaks into its own encoding), encoder/scaler set by hand in `config.yaml` (target encoding + robust scaling, reasons in the comments); **two fixes** in `clean_dataset()`: genuine `NaN`s in categorical columns were being turned into the string `"nan"` (a fake category), so 229 `c_charge_degree` gaps were never imputed or flagged -- fixed in `config.yaml` alone: `"nan"` added to `diagnostics.placeholder_tokens` (the category cleanup's last step turns listed tokens into `NaN`, after its text conversion); and it no longer drops rows -- de-duplication moved to a separate, training-only `drop_duplicate_rows()` (run before the dev/test split), so the same cleaning can run on new data where every row needs a prediction; `src/data_diagnostics.py` removed -- its one cleaning function (`flag_invalid_values`) moved into `preprocessing.py`, and the EDA-only checks (missingness test, duplicate counts) live in the EDA notebooks, not in every pipeline run; `dummy` (majority-class) model added as the floor to beat, and `random_forest` registered (sensible defaults, untuned); the final model is refit on the whole development set after CV; `config.yaml` gains `test_set` and `cv` sections -- see "Model evaluation" below |
+| 5 | Hyperparameter tuning without leakage | New `src/tuning.py`: hyperparameters are tuned with **Optuna** (seeded TPE sampler) on the development set only -- every candidate is scored by stratified 5-fold CV of the **whole** pipeline (preprocessing re-fit in every fold of every trial), on the same folds for every candidate; the tuning procedure is estimated honestly by **nested cross-validation** (the tuning repeated inside each outer CV fold, scored on the outer fold it never saw), whose out-of-fold predictions now feed the classification report and fairness check; the reported "best trial" score is shown next to the nested one as an optimism check; the final model is the tuned pipeline refit on all development rows; `build_pipeline()` in `src/model.py` now builds the preprocessing + model `Pipeline` (one place to add a learned step later); `config.yaml` gains a `tuning` section (on/off, trials, inner folds, seed, one search space per model type); `optuna` added to `requirements.txt`. The locked test set is still untouched -- see "Class 5 & 6" at the top |
+| 6 | Ensembles in depth: random forest, oblique random forest, AdaBoost (+ feature engineering) | Two new model types in `src/model.py`: `oblique_random_forest` (a forest of oblique trees built from scikit-learn parts -- every tree splits on its own random sparse linear combinations of the features, via `SparseRandomProjection` inside `BaggingClassifier`) and `adaboost` (AdaBoost over decision trees of a chosen depth; stumps by default), both registered in `_MODELS`; `config.yaml` gains search spaces for the three ensembles -- the forests tune tree size (`max_depth`, `min_samples_leaf`) and decorrelation (`max_features` / number of combinations) but not the number of trees, AdaBoost tunes its base trees' depth, its number of rounds and its learning rate, and logistic regression gets a search space for `C`; `corrected_paired_test()` in `src/evaluate.py` compares two models scored on the same folds (Nadeau & Bengio's corrected paired t-test), so a "winner" is only called when the difference is bigger than fold-to-fold noise; **hand-made features** (`priors_per_adult_year`, `young_with_priors`; fixed formulas in `src/preprocessing.py`, switched on in `config.yaml` under `preprocessing.engineered_features`); CV/tuning metric switched from accuracy to **macro-F1** (`cv.scoring: f1_macro`), so both classes count equally; `scipy` listed in `requirements.txt` (it already came with scikit-learn, so nothing new to install) -- see "Class 5 & 6" at the top |
 
 ## Preprocessing decisions
 
@@ -196,7 +212,7 @@ python main.py
 ```
 
 This loads `config.yaml`, diagnoses and cleans the data (week 3), locks the final test set away, cross-validates preprocessing + model on the development set (week 4), and prints:
-- **a per-fold cross-validation table** -- train and validation accuracy for each of the 5 folds, the gap between them, and their mean ± std. Comparing train and validation is how you catch overfitting: if the model looks much better on the data it was trained on than on data it's never seen, it has memorised rather than learned something that generalises.
+- **a per-fold cross-validation table** -- train and validation score (the metric set in `cv.scoring`, now macro-F1) for each of the 5 folds, the gap between them, and their mean ± std. Comparing train and validation is how you catch overfitting: if the model looks much better on the data it was trained on than on data it's never seen, it has memorised rather than learned something that generalises.
 - a classification report on the out-of-fold predictions
 - a false-positive-rate-by-race comparison between our model and COMPAS's own score (same rows)
 - the final model -- the same pipeline refit on all development rows (CV estimated how good it is; this is the model itself)

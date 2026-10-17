@@ -17,6 +17,7 @@ See Practical/W4/notebooks/03_cross_validation.ipynb for the full walkthrough.
 """
 import numpy as np
 import pandas as pd
+from scipy import stats
 from sklearn.metrics import classification_report
 from sklearn.model_selection import cross_validate
 
@@ -111,3 +112,28 @@ def fairness_report(y_true, y_pred, extras: pd.DataFrame, sensitive_attr: str = 
     text = "\n".join(lines)
     print(text)
     return text
+
+
+def corrected_paired_test(scores_a, scores_b, test_train_ratio: float) -> dict:
+    """
+    Week 6: is model A really better than model B, or is the gap just fold-to-fold noise?
+
+    Corrected paired t-test (Nadeau & Bengio, 2003) for two models scored on the SAME CV folds.
+    The folds share most of their training rows, so their scores are correlated and a plain
+    paired t-test is overconfident. The variance of the per-fold differences is therefore
+    inflated: 1/k becomes 1/k + test_train_ratio, where test_train_ratio is
+    (validation rows / training rows) per fold = 1 / (n_splits - 1) for k-fold CV.
+
+    Use it on the per-fold `validation` columns of two nested-CV runs (same folds), e.g.
+        corrected_paired_test(nested_rf["validation"], nested_ada["validation"], 1 / (n_splits - 1))
+
+    Returns {"mean_diff": mean(a - b), "wins": folds where a > b, "t": t statistic,
+             "p_value": two-sided p-value with k - 1 degrees of freedom}.
+    A "winner" is only worth calling when p_value is small (conventionally < 0.05).
+    """
+    diff = np.asarray(scores_a, dtype=float) - np.asarray(scores_b, dtype=float)
+    k = len(diff)
+    se = np.sqrt((1 / k + test_train_ratio) * diff.var(ddof=1))
+    t = float(diff.mean() / se) if se > 0 else 0.0
+    p_value = float(2 * stats.t.sf(abs(t), df=k - 1))
+    return {"mean_diff": float(diff.mean()), "wins": f"{int((diff > 0).sum())}/{k}", "t": t, "p_value": p_value}

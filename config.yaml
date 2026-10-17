@@ -24,7 +24,7 @@ cv:
   n_splits: 5
   shuffle: true
   random_state: 42
-  scoring: "accuracy"   # one metric for now, so numbers compare directly with weeks 2-3
+  scoring: "f1_macro"   # one metric for now, so numbers compare directly with weeks 2-3
   n_jobs: 1             # folds fitted in parallel; -1 = all cores (only pays off for slow models, e.g. random forest)
 
 # The week 3 diagnosis, written down as cleaning rules (found in Practical/W3/notebooks/01_eda_introduction.ipynb).
@@ -77,6 +77,9 @@ preprocessing:
   # options: "none" | "standard" | "minmax" | "robust"
   scaler: "robust"       # median/IQR: the few extreme counts (e.g. priors_count) don't set the scale for everyone
   numeric_features: ["age", "juv_fel_count", "juv_misd_count", "juv_other_count", "priors_count"]
+  # week 6: hand-made features (formulas in src/preprocessing.py `_ENGINEERED`), added to the numeric features.
+  # options: "priors_per_adult_year" | "young_with_priors".  [] = baseline without engineered features.
+  engineered_features: ["priors_per_adult_year", "young_with_priors"]
   categorical_features: ["sex", "age_cat", "c_charge_degree"]
   # MNAR-diagnosed columns (see diagnostics above / the EDA notebook's mechanism test) get an
   # extra "_was_missing" flag alongside their imputed value, so the model can still see the
@@ -88,21 +91,63 @@ preprocessing:
     numeric_strategy: "median"        # applies to age, juv_fel_count, juv_misd_count, juv_other_count, priors_count
     categorical_strategy: "most_frequent"   # applies to sex, age_cat, c_charge_degree
 
+
+# Random Forest Model 
+# model:
+#   # one of: "dummy" (majority-class floor), "logistic_regression", "decision_tree", "random_forest"
+#   # (random forest: sensible defaults, untuned -- see the example below)
+#   # type: "decision_tree"
+#   # params:
+#     # bumped from 1000 -- with this week's encoder/scaler pair in place, 1000 iterations
+#     # was cutting lbfgs off before it converged (a ConvergenceWarning, not a real problem,
+#     # but worth just giving it enough room rather than living with the warning)
+#     # max_iter: 2000
+#    type: "random_forest"
+#    params:
+#   #   n_estimators: 300
+#      random_state: 42   # forests are random (bootstrap rows + random feature subsets): fix the seed
+#   #   n_jobs: -1        
+  
+#Oblique Random Forest
+# model:
+#   type: "oblique_random_forest"
+#   params:
+#     n_estimators: 200
+#     random_state: 42
+#     n_jobs: -1
+
 model:
-  # one of: "dummy" (majority-class floor), "logistic_regression", "decision_tree", "random_forest"
-  # (random forest: sensible defaults, untuned -- see the example below)
-  type: "logistic_regression"
+  type: "adaboost"
   params:
-    # bumped from 1000 -- with this week's encoder/scaler pair in place, 1000 iterations
-    # was cutting lbfgs off before it converged (a ConvergenceWarning, not a real problem,
-    # but worth just giving it enough room rather than living with the warning)
-    max_iter: 2000
-  # Random Forest example -- swap the two lines above for these to run it:
-  # type: "random_forest"
-  # params:
-  #   n_estimators: 300
-  #   random_state: 42   # forests are random (bootstrap rows + random feature subsets): fix the seed
-  #   n_jobs: -1         # use every CPU core -- the trees are independent, so they train in parallel
+    random_state: 42
 
 output:
   results_dir: "results"   # each run's full report is saved here as a timestamped .txt file
+
+
+tuning:
+  enabled: true
+  n_trials: 30
+  n_splits: 5                                       # folds that score each candidate
+  random_state: 42                                  # seeds the sampler and those folds
+  # Keys are Pipeline parameter names. Types: int / float (low, high, log) or categorical (choices).
+  # Ensembles take minutes per run: use a small n_trials while testing.
+  search_spaces:
+    decision_tree:
+      model__max_depth: {type: int, low: 1, high: 20}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__criterion: {type: categorical, choices: ["gini", "entropy"]}
+    logistic_regression:
+      model__C: {type: float, low: 0.0001, high: 100, log: true}   # inverse regularisation strength (smaller = stronger)
+    random_forest:
+      model__max_depth: {type: int, low: 2, high: 30}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__max_features: {type: categorical, choices: ["sqrt", 0.5, 1.0]}
+    oblique_random_forest:
+      model__estimator__tree__max_depth: {type: int, low: 2, high: 30}
+      model__estimator__tree__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__estimator__project__n_components: {type: int, low: 3, high: 12}   # ~ number of features (10 baseline, 12 with both engineered)
+    adaboost:
+      model__estimator__max_depth: {type: int, low: 1, high: 8}
+      model__n_estimators: {type: int, low: 25, high: 400, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 1.0, log: true}

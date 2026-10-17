@@ -8,6 +8,14 @@ import os
 from datetime import datetime
 
 
+def _tuning_line(tuning) -> str:
+    """Week 5: records how (and whether) the model was tuned, so a results file is reproducible."""
+    if not tuning or not tuning.get("enabled", False):
+        return "Tuning: off\n"
+    return (f"Tuning: Optuna  n_trials={tuning['n_trials']}  inner_folds={tuning['n_splits']}  "
+            f"random_state={tuning['random_state']}\n")
+
+
 def save_run(results_dir: str, config: dict, report_text: str) -> str:
     """
     Writes one run's full report to a timestamped .txt file inside
@@ -25,8 +33,10 @@ def save_run(results_dir: str, config: dict, report_text: str) -> str:
         f"Model: {config['model']['type']}  params={config['model'].get('params')}\n"
         f"Preprocessing: encoder={config['preprocessing']['encoder']}  "
         f"scaler={config['preprocessing']['scaler']}\n"
+        f"Engineered features: {config['preprocessing'].get('engineered_features') or 'none'}\n"
         f"CV: {cv['n_splits']} stratified folds  shuffle={cv.get('shuffle', True)}  "
         f"random_state={cv.get('random_state')}  metric={cv.get('scoring', 'accuracy')}\n"
+        f"{_tuning_line(config.get('tuning'))}"
         f"Locked test set: size={config['test_set']['size']}  "
         f"random_state={config['test_set']['random_state']}  (not evaluated)\n"
         + "=" * 60 + "\n\n"
