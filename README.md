@@ -66,6 +66,33 @@ Findings:
 - The locked test set (1443 rows) has not been evaluated and stays that way until the final model is chosen.
 
 
+Class 7 - end of October (gradient boosting, probabilities and the scoreboard)
+
+What happened: I added two boosting models, `gradient_boosting` and `hist_gradient_boosting` (`naive_bayes` is registered too but I did not use it). Evaluation changed more: instead of one number I now keep every row's out-of-fold probability and report 8 metrics (accuracy, balanced accuracy, precision, recall, F1, F-beta 2, ROC-AUC, average precision). One of them, ROC-AUC, is the selection metric that tuning maximises. Every run adds a row to `results/runs.csv` (the scoreboard), together with the no-model floor and the untuned score on the same folds. I ran every model once, tuned with Optuna (30 trials, nested 5-fold CV, same folds for all, seed 42), with the two engineered features on. The metric changed from macro-F1 to ROC-AUC, so these numbers are not comparable to the week 5 and 6 results below.
+
+Scoreboard (ROC-AUC, 5 folds on the 5771 development rows; tuned = nested CV, the honest estimate; locked test set untouched):
+
+| Model | Untuned | Tuned (nested) | Gain |
+|---|---|---|---|
+| Dummy (floor) | 0.500 | - | - |
+| Decision tree | 0.593 | 0.719 ± 0.012 | +0.126 |
+| Logistic regression | 0.722 | 0.722 ± 0.012 | 0.000 |
+| AdaBoost | 0.722 | 0.726 ± 0.012 | +0.005 |
+| HistGradientBoosting | 0.715 | 0.726 ± 0.015 | +0.011 |
+| Oblique random forest | 0.682 | 0.727 ± 0.013 | +0.045 |
+| Random forest | 0.686 | 0.727 ± 0.015 | +0.041 |
+| Gradient boosting | 0.726 | 0.727 ± 0.013 | +0.001 |
+
+Findings:
+- The models that overfit when untuned gain the most from tuning (tree +0.126, forests about +0.04). The ones that already generalise (logistic regression, AdaBoost, gradient boosting) gain almost nothing.
+- Six models end up at the same level, 0.722 to 0.727. The corrected paired test finds no difference between gradient boosting and HistGradientBoosting, AdaBoost, random forest or oblique random forest (p = 0.45 to 0.92). The only clear difference is gradient boosting over logistic regression: +0.005 in all 5 folds (p = 0.004). Against the tuned decision tree it is borderline (p = 0.10). The gap is small, but it is consistent.
+- Tuning is honest here: optimism (best-trial score minus nested score) is at most 0.001 for every model.
+- The extra metrics tell a different story from ROC-AUC for logistic regression: its recall is only 0.43 (the boosters and forests are at 0.53 to 0.55), so it misses more people who reoffend, and its balanced accuracy is lowest (0.647 vs 0.662 to 0.668).
+- Fairness did not change with the model. The false positive rate for African-American vs Caucasian defendants is about 0.28 vs 0.16 for the boosters and forests (0.19 vs 0.09 for logistic regression, which flags fewer people overall), against COMPAS's own 0.45 vs 0.23. The ratio stays close to 2x.
+- With only 5 folds and a gap of about 0.001 between the top models, I would not call a winner among the six. Gradient boosting is the model `main.py` runs.
+
+Selection metric: I chose ROC-AUC. COMPAS is a risk score used to rank people, and ROC-AUC scores that ranking over every threshold, so it does not depend on the 0.5 cutoff, which is a separate decision. It also separates models better than accuracy (the same difference between two models can be significant in ROC-AUC and invisible in accuracy). The other seven metrics are reported for every run, and I picked ROC-AUC before looking at the results.
+
 Class 5 & 6 - October (hyperparameter tuning, ensembles, feature engineering)
 
 What happened: week 5 added Optuna tuning with nested cross-validation (`src/tuning.py`); week 6 added two models, an oblique random forest and AdaBoost, plus a corrected paired test (`corrected_paired_test()`) to compare models fairly. I also switched the metric to macro-F1 and added two hand-made features, `priors_per_adult_year` and `young_with_priors`. All three models were tuned with 30 trials on the same folds.
@@ -100,7 +127,7 @@ Findings:
 │   ├── model.py               # model construction (incl. the oblique random forest and AdaBoost builders, week 6) + build_pipeline(): preprocessing + model as one estimator (week 5)
 │   ├── evaluate.py           # stratified k-fold cross-validation, out-of-fold report + fairness check (week 4), corrected paired test to compare two models (week 6)
 │   ├── tuning.py             # hyperparameter tuning with Optuna + nested cross-validation (week 5)
-│   └── results.py            # saves each run's report to disk
+│   └── results.py            # saves each run's report to disk, and its scores to the scoreboard results/runs.csv (week 7)
 ├── results/                  # created automatically -- one file per run (not tracked in git)
 └── data/
     ├── compas_two_year_recidivism.csv
@@ -118,6 +145,7 @@ This table is updated after each practical class, so you can always see what cha
 | 4 | Preprocessing inside the pipeline + cross-validation -- evaluating a model honestly | A **locked final test set** (20%, stratified, seed 42) is set aside by `split_dev_test()` (replaces `split_train_test()`) and never scored; models are now judged by **stratified 5-fold cross-validation** of the whole pipeline (preprocessing + model) on the development set, reported per fold with mean ± std and the train-validation gap; the classification report and fairness check now use out-of-fold predictions; target encoding switched to scikit-learn's cross-fitting `TargetEncoder` (a row's own label never leaks into its own encoding), encoder/scaler set by hand in `config.yaml` (target encoding + robust scaling, reasons in the comments); **two fixes** in `clean_dataset()`: genuine `NaN`s in categorical columns were being turned into the string `"nan"` (a fake category), so 229 `c_charge_degree` gaps were never imputed or flagged -- fixed in `config.yaml` alone: `"nan"` added to `diagnostics.placeholder_tokens` (the category cleanup's last step turns listed tokens into `NaN`, after its text conversion); and it no longer drops rows -- de-duplication moved to a separate, training-only `drop_duplicate_rows()` (run before the dev/test split), so the same cleaning can run on new data where every row needs a prediction; `src/data_diagnostics.py` removed -- its one cleaning function (`flag_invalid_values`) moved into `preprocessing.py`, and the EDA-only checks (missingness test, duplicate counts) live in the EDA notebooks, not in every pipeline run; `dummy` (majority-class) model added as the floor to beat, and `random_forest` registered (sensible defaults, untuned); the final model is refit on the whole development set after CV; `config.yaml` gains `test_set` and `cv` sections -- see "Model evaluation" below |
 | 5 | Hyperparameter tuning without leakage | New `src/tuning.py`: hyperparameters are tuned with **Optuna** (seeded TPE sampler) on the development set only -- every candidate is scored by stratified 5-fold CV of the **whole** pipeline (preprocessing re-fit in every fold of every trial), on the same folds for every candidate; the tuning procedure is estimated honestly by **nested cross-validation** (the tuning repeated inside each outer CV fold, scored on the outer fold it never saw), whose out-of-fold predictions now feed the classification report and fairness check; the reported "best trial" score is shown next to the nested one as an optimism check; the final model is the tuned pipeline refit on all development rows; `build_pipeline()` in `src/model.py` now builds the preprocessing + model `Pipeline` (one place to add a learned step later); `config.yaml` gains a `tuning` section (on/off, trials, inner folds, seed, one search space per model type); `optuna` added to `requirements.txt`. The locked test set is still untouched -- see "Class 5 & 6" at the top |
 | 6 | Ensembles in depth: random forest, oblique random forest, AdaBoost (+ feature engineering) | Two new model types in `src/model.py`: `oblique_random_forest` (a forest of oblique trees built from scikit-learn parts -- every tree splits on its own random sparse linear combinations of the features, via `SparseRandomProjection` inside `BaggingClassifier`) and `adaboost` (AdaBoost over decision trees of a chosen depth; stumps by default), both registered in `_MODELS`; `config.yaml` gains search spaces for the three ensembles -- the forests tune tree size (`max_depth`, `min_samples_leaf`) and decorrelation (`max_features` / number of combinations) but not the number of trees, AdaBoost tunes its base trees' depth, its number of rounds and its learning rate, and logistic regression gets a search space for `C`; `corrected_paired_test()` in `src/evaluate.py` compares two models scored on the same folds (Nadeau & Bengio's corrected paired t-test), so a "winner" is only called when the difference is bigger than fold-to-fold noise; **hand-made features** (`priors_per_adult_year`, `young_with_priors`; fixed formulas in `src/preprocessing.py`, switched on in `config.yaml` under `preprocessing.engineered_features`); CV/tuning metric switched from accuracy to **macro-F1** (`cv.scoring: f1_macro`), so both classes count equally; `scipy` listed in `requirements.txt` (it already came with scikit-learn, so nothing new to install) -- see "Class 5 & 6" at the top |
+| 7 | Gradient boosting + evaluating with probabilities | Two new model types in `src/model.py`: `gradient_boosting` (`GradientBoostingClassifier`: each shallow tree fits the gradient of the log-loss left by the trees before it) and `hist_gradient_boosting` (the same idea on binned features: much faster on large data, and it handles missing values itself), plus `naive_bayes` (`GaussianNB`) registered in `_MODELS`; gradient boosting is now the model `main.py` runs, with a search space for each booster in `config.yaml`; evaluation now reports **several metrics** (accuracy, balanced accuracy, precision, recall, F1, F-beta, ROC-AUC, average precision) and one **selection metric** (`cv.selection_metric`, ROC-AUC) that tuning maximises and runs are ranked by; out-of-fold **probabilities** (not just labels) feed the reports, with a confusion matrix; new `build_scorers()` in `src/evaluate.py`; new `save_scores()` in `src/results.py`: every run adds a row to `results/runs.csv` (the model and its settings, the score on each fold, the no-model floor and the untuned score on the same folds), so any two runs on the same data and folds can be compared with `corrected_paired_test()` -- see "Class 7" at the top |
 
 ## Preprocessing decisions
 
@@ -212,7 +240,7 @@ python main.py
 ```
 
 This loads `config.yaml`, diagnoses and cleans the data (week 3), locks the final test set away, cross-validates preprocessing + model on the development set (week 4), and prints:
-- **a per-fold cross-validation table** -- train and validation score (the metric set in `cv.scoring`, now macro-F1) for each of the 5 folds, the gap between them, and their mean ± std. Comparing train and validation is how you catch overfitting: if the model looks much better on the data it was trained on than on data it's never seen, it has memorised rather than learned something that generalises.
+- **a per-fold cross-validation table** -- train and validation score (the selection metric `cv.selection_metric`, now ROC-AUC; the other metrics are listed too) for each of the 5 folds, the gap between them, and their mean ± std. Comparing train and validation is how you catch overfitting: if the model looks much better on the data it was trained on than on data it's never seen, it has memorised rather than learned something that generalises.
 - a classification report on the out-of-fold predictions
 - a false-positive-rate-by-race comparison between our model and COMPAS's own score (same rows)
 - the final model -- the same pipeline refit on all development rows (CV estimated how good it is; this is the model itself)

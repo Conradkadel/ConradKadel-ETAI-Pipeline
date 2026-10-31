@@ -1,11 +1,12 @@
 """Model construction."""
 from sklearn.dummy import DummyClassifier
-from sklearn.ensemble import BaggingClassifier, RandomForestClassifier, AdaBoostClassifier
+from sklearn.ensemble import BaggingClassifier, RandomForestClassifier, AdaBoostClassifier, GradientBoostingClassifier, HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.tree import DecisionTreeClassifier
 from src.preprocessing import build_preprocessor
+from sklearn.naive_bayes import GaussianNB
 
 
 def build_model(model_config: dict):
@@ -69,4 +70,7 @@ _MODELS = {
     "random_forest": RandomForestClassifier,
     "adaboost": adaboost,
     "oblique_random_forest": oblique_random_forest,
+    # Week 6:  HistGradientBoosting, GradientBoosting, GaussianNB
+    "hist_gradient_boosting": HistGradientBoostingClassifier,
+    "gradient_boosting": GradientBoostingClassifier,
 }
